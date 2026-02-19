@@ -1,5 +1,85 @@
 from fastapi import FastAPI, Query
 from datetime import date
+import time
+import requests
+from bs4 import BeautifulSoup
+from urllib.parse import quote_plus
+
+CACHE = {}  # (market, q) -> (ts, payload)
+CACHE_TTL_SECONDS = 60 * 60  # 1 hour
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+def scrape_etsy_search(q: str, limit: int = 50):
+    url = f"https://www.etsy.com/search?q={quote_plus(q)}"
+    r = requests.get(url, headers=HEADERS, timeout=30)
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, "html.parser")
+
+    items = []
+    # Etsy markup changes often; we use robust heuristics: find listing links.
+    for a in soup.select('a[href*="/listing/"]'):
+        href = a.get("href")
+        if not href:
+            continue
+        if "/listing/" not in href:
+            continue
+        # normalize
+        listing_url = href.split("?")[0]
+        listing_id = None
+        try:
+            # https://www.etsy.com/listing/123456789/title...
+            parts = listing_url.split("/listing/")[1].split("/")
+            listing_id = parts[0]
+        except Exception:
+            listing_id = None
+
+        # title heuristic: aria-label or text nearby
+        title = a.get("aria-label") or a.get_text(" ", strip=True)
+        if not title or len(title) < 8:
+            continue
+
+        items.append({
+            "id": f"etsy-{listing_id or len(items)+1}",
+            "listing_id": listing_id,
+            "title": title[:180],
+            "url": listing_url,
+        })
+        if len(items) >= limit:
+            break
+
+    # de-dup by url
+    seen = set()
+    deduped = []
+    for it in items:
+        if it["url"] in seen:
+            continue
+        seen.add(it["url"])
+        deduped.append(it)
+
+    return deduped[:limit]
+
+@app.get("/trend_real")
+def trend_real(market: str = Query(..., pattern="^(US|UK)$"), q: str = "graphic tee"):
+    key = (market, q)
+    now = time.time()
+    cached = CACHE.get(key)
+    if cached and (now - cached[0]) < CACHE_TTL_SECONDS:
+        return cached[1]
+
+    items = scrape_etsy_search(q=q, limit=50)
+
+    payload = {
+        "market": market,
+        "date": str(date.today()),
+        "query": q,
+        "items": items
+    }
+    CACHE[key] = (now, payload)
+    return payload
 
 app = FastAPI(title="TeePulse API")
 
