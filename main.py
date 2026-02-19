@@ -5,6 +5,18 @@ import requests
 from bs4 import BeautifulSoup
 from urllib.parse import quote_plus
 
+from fastapi.middleware.cors import CORSMiddleware
+
+app = FastAPI(title="TeePulse API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 CACHE = {}  # (market, q) -> (ts, payload)
 CACHE_TTL_SECONDS = 60 * 60  # 1 hour
 
@@ -20,24 +32,18 @@ def scrape_etsy_search(q: str, limit: int = 50):
     soup = BeautifulSoup(r.text, "html.parser")
 
     items = []
-    # Etsy markup changes often; we use robust heuristics: find listing links.
     for a in soup.select('a[href*="/listing/"]'):
         href = a.get("href")
-        if not href:
+        if not href or "/listing/" not in href:
             continue
-        if "/listing/" not in href:
-            continue
-        # normalize
+
         listing_url = href.split("?")[0]
         listing_id = None
         try:
-            # https://www.etsy.com/listing/123456789/title...
-            parts = listing_url.split("/listing/")[1].split("/")
-            listing_id = parts[0]
+            listing_id = listing_url.split("/listing/")[1].split("/")[0]
         except Exception:
             listing_id = None
 
-        # title heuristic: aria-label or text nearby
         title = a.get("aria-label") or a.get_text(" ", strip=True)
         if not title or len(title) < 8:
             continue
@@ -51,7 +57,6 @@ def scrape_etsy_search(q: str, limit: int = 50):
         if len(items) >= limit:
             break
 
-    # de-dup by url
     seen = set()
     deduped = []
     for it in items:
@@ -61,6 +66,12 @@ def scrape_etsy_search(q: str, limit: int = 50):
         deduped.append(it)
 
     return deduped[:limit]
+
+
+@app.get("/health")
+def health():
+    return {"ok": True}
+
 
 @app.get("/trend_real")
 def trend_real(market: str = Query(..., pattern="^(US|UK)$"), q: str = "graphic tee"):
@@ -80,8 +91,6 @@ def trend_real(market: str = Query(..., pattern="^(US|UK)$"), q: str = "graphic 
     }
     CACHE[key] = (now, payload)
     return payload
-
-app = FastAPI(title="TeePulse API")
 
 US = [
   {"id":"us-01","title":"Retro Sunset Mountain Graphic Tee","price":19.95,"currency":"USD","shop":"PrintPilotTees","rating":4.8,"reviews_count":1240,"tags":["retro","sunset","mountain","outdoors","graphictee","vintage"],"bestseller_badge":True},
